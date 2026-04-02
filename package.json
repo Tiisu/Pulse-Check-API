@@ -1,0 +1,15 @@
+{
+  "name": "pulse-check-api",
+  "version": "1.0.0",
+  "description": "A Dead Man's Switch API for monitoring remote device heartbeats",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": ["monitoring", "heartbeat", "dead-man-switch", "api"],
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}
