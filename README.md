@@ -199,3 +199,271 @@ Pulse-Check-API/
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## Setup Instructions
+
+### Prerequisites
+
+- **Node.js** v18 or higher
+- **npm**
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/<your-username>/Pulse-Check-API.git
+cd Pulse-Check-API
+
+# Install dependencies
+npm install
+```
+
+### Running the Server
+
+```bash
+# Production
+npm start
+
+# Development (auto-restart on file changes)
+npm run dev
+```
+
+The server starts on `http://localhost:3000` by default. Set the `PORT` environment variable to change it:
+
+```bash
+PORT=8080 npm start
+```
+
+### Verify It's Running
+
+```bash
+curl http://localhost:3000/health
+```
+
+```json
+{
+  "status": "ok",
+  "service": "Pulse-Check-API",
+  "uptime": 5.123,
+  "timestamp": "2026-04-02T20:00:00.000Z"
+}
+```
+
+---
+
+## API Documentation
+
+### Base URL
+
+```
+http://localhost:3000
+```
+
+### Endpoints
+
+#### `POST /monitors` — Register a Monitor
+
+Creates a new monitor and starts its countdown timer.
+
+**Request Body:**
+```json
+{
+  "id": "device-123",
+  "timeout": 60,
+  "alert_email": "admin@critmon.com"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique device identifier |
+| `timeout` | number | Countdown duration in seconds (must be > 0) |
+| `alert_email` | string | Email address to alert on timeout |
+
+**Responses:**
+
+| Status | Description |
+|---|---|
+| `201 Created` | Monitor created successfully |
+| `400 Bad Request` | Missing or invalid fields |
+| `409 Conflict` | Monitor with this ID already exists |
+
+**Example:**
+```bash
+curl -X POST http://localhost:3000/monitors \
+  -H "Content-Type: application/json" \
+  -d '{"id": "device-123", "timeout": 60, "alert_email": "admin@critmon.com"}'
+```
+
+```json
+{
+  "message": "Monitor created for device-123",
+  "monitor": {
+    "id": "device-123",
+    "status": "active",
+    "timeout": 60,
+    "remaining": 60,
+    "alert_email": "admin@critmon.com",
+    "last_heartbeat": "2026-04-02T20:00:00.000Z",
+    "created_at": "2026-04-02T20:00:00.000Z"
+  }
+}
+```
+
+---
+
+#### `POST /monitors/:id/heartbeat` — Send Heartbeat
+
+Resets the countdown timer. Also resumes monitoring if the device was paused or down.
+
+**Responses:**
+
+| Status | Description |
+|---|---|
+| `200 OK` | Timer reset successfully |
+| `404 Not Found` | Monitor ID does not exist |
+
+**Example:**
+```bash
+curl -X POST http://localhost:3000/monitors/device-123/heartbeat
+```
+
+```json
+{
+  "message": "Heartbeat received. Timer reset.",
+  "monitor": {
+    "id": "device-123",
+    "status": "active",
+    "timeout": 60,
+    "remaining": 60,
+    "alert_email": "admin@critmon.com",
+    "last_heartbeat": "2026-04-02T20:01:00.000Z",
+    "created_at": "2026-04-02T20:00:00.000Z"
+  }
+}
+```
+
+---
+
+#### `POST /monitors/:id/pause` — Pause Monitoring
+
+Stops the countdown timer. No alerts will fire while paused. Send a heartbeat to resume.
+
+**Responses:**
+
+| Status | Description |
+|---|---|
+| `200 OK` | Monitor paused |
+| `400 Bad Request` | Monitor is already paused |
+| `404 Not Found` | Monitor ID does not exist |
+
+**Example:**
+```bash
+curl -X POST http://localhost:3000/monitors/device-123/pause
+```
+
+```json
+{
+  "message": "Monitor 'device-123' has been paused. Send a heartbeat to resume.",
+  "monitor": {
+    "id": "device-123",
+    "status": "paused",
+    "timeout": 60,
+    "remaining": null,
+    "alert_email": "admin@critmon.com",
+    "last_heartbeat": "2026-04-02T20:01:00.000Z",
+    "created_at": "2026-04-02T20:00:00.000Z"
+  }
+}
+```
+
+---
+
+#### `GET /monitors` — List All Monitors
+
+Returns all registered monitors with their current status and remaining time.
+
+**Example:**
+```bash
+curl http://localhost:3000/monitors
+```
+
+```json
+{
+  "count": 2,
+  "monitors": [
+    {
+      "id": "device-123",
+      "status": "active",
+      "timeout": 60,
+      "remaining": 45,
+      "alert_email": "admin@critmon.com",
+      "last_heartbeat": "2026-04-02T20:01:00.000Z",
+      "created_at": "2026-04-02T20:00:00.000Z"
+    },
+    {
+      "id": "weather-station-7",
+      "status": "down",
+      "timeout": 120,
+      "remaining": null,
+      "alert_email": "ops@critmon.com",
+      "last_heartbeat": "2026-04-02T19:50:00.000Z",
+      "created_at": "2026-04-02T19:48:00.000Z"
+    }
+  ]
+}
+```
+
+---
+
+#### `GET /monitors/:id` — Get Monitor Details
+
+Returns details for a single monitor including real-time remaining countdown.
+
+**Responses:**
+
+| Status | Description |
+|---|---|
+| `200 OK` | Monitor details returned |
+| `404 Not Found` | Monitor ID does not exist |
+
+**Example:**
+```bash
+curl http://localhost:3000/monitors/device-123
+```
+
+---
+
+#### `DELETE /monitors/:id` — Delete a Monitor
+
+Removes the monitor and clears its timer permanently.
+
+**Responses:**
+
+| Status | Description |
+|---|---|
+| `200 OK` | Monitor deleted |
+| `404 Not Found` | Monitor ID does not exist |
+
+**Example:**
+```bash
+curl -X DELETE http://localhost:3000/monitors/device-123
+```
+
+```json
+{
+  "message": "Monitor 'device-123' has been deleted"
+}
+```
+
+---
+
+#### `GET /health` — Health Check
+
+Returns the service status and uptime.
+
+```bash
+curl http://localhost:3000/health
+```
