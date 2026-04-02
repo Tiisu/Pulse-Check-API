@@ -1,135 +1,201 @@
-# Pulse-Check-API ("Watchdog" Sentinel)
-This challenge is designed to test your ability to bridge Computer Science fundamentals with Modern Backend Engineering.
+# 🫀 Pulse-Check-API
 
-## 1. Business Context
-> **Client:** *CritMon Servers Inc.* (A Critical Infrastructure Monitoring Company).
+A **Dead Man's Switch API** for monitoring remote device heartbeats. Built for CritMon Servers Inc. to track solar farms and unmanned weather stations in areas with poor connectivity.
 
-### The Problem
-CritMon provides monitoring for remote solar farms and unmanned weather stations in areas with poor connectivity. These devices are supposed to send "I'm alive" signals every hour.
-
-Currently, CritMon has no way of knowing if a device has gone offline (due to power failure or theft) until a human manually checks the logs. They need a system that alerts *them* when a device *stops* talking.
-
-### The Solution
-You need to build a **Dead Man’s Switch API**. Devices will register a "monitor" with a countdown timer (e.g., 60 seconds). If the device fails to "ping" (send a heartbeat) to the API before the timer runs out, the system automatically triggers an alert.
+Devices register a monitor with a countdown timer. If a device fails to send a heartbeat before the timer expires, the system automatically fires an alert — no human checking required.
 
 ---
 
-## 2. Technical Objective
-Build a backend service that manages stateful timers.
+## Architecture
 
-* **Registration:** Allow a client to create a monitor with a specific timeout duration.
-* **Heartbeat:** Reset the countdown when a ping is received.
-* **Trigger:** Fire a webhook (or log a critical error) if the countdown reaches zero.
+### High-Level System Architecture
 
+The system follows a **layered architecture** with strict separation of concerns. Each layer only communicates with its immediate neighbor.
+
+```mermaid
+graph TB
+    subgraph Clients ["🌐 Client Layer"]
+        DEV["IoT Device<br/>(Heartbeat Sender)"]
+        ADMIN["Admin / Dashboard<br/>(Monitor Management)"]
+    end
+
+    subgraph API ["⚡ API Gateway Layer"]
+        EXP["Express.js Server<br/>───────────────<br/>• JSON body parsing<br/>• Request logging<br/>• Route dispatch<br/>• 404 handling"]
+    end
+
+    subgraph Routes ["🛣️ Routing Layer"]
+        MR["Monitor Router<br/>───────────────<br/>POST /monitors<br/>POST /monitors/:id/heartbeat<br/>POST /monitors/:id/pause<br/>GET  /monitors<br/>GET  /monitors/:id<br/>DELETE /monitors/:id"]
+    end
+
+    subgraph Business ["🧠 Business Logic Layer"]
+        MC["Monitor Controller<br/>───────────────<br/>• Input validation<br/>• Request/Response mapping<br/>• Error responses<br/>• Response formatting"]
+    end
+
+    subgraph Services ["⚙️ Service Layer"]
+        TS["Timer Service<br/>───────────────<br/>• setTimeout management<br/>• Countdown tracking<br/>• Remaining time calc<br/>• Alert triggering"]
+    end
+
+    subgraph Data ["💾 Data Layer"]
+        MS["Monitor Store<br/>───────────────<br/>• In-Memory Map<br/>• CRUD operations<br/>• State management"]
+    end
+
+    DEV -->|"HTTP Requests"| EXP
+    ADMIN -->|"HTTP Requests"| EXP
+    EXP --> MR
+    MR --> MC
+    MC --> TS
+    MC --> MS
+    TS -->|"onTimerExpired()"| MS
+    TS -.->|"🚨 ALERT"| ALERT["Alert Output"]
+```
+
+### Request Lifecycle — Sequence Diagram
+
+Covers all flows including error paths (validation failures, 404s, 409 conflicts).
+
+```mermaid
+sequenceDiagram
+    actor D as 📡 Device
+    actor A as 👤 Admin
+    participant S as Express Server
+    participant C as Controller
+    participant TS as Timer Service
+    participant MS as Monitor Store
+
+    rect rgb(22, 33, 62)
+        Note over D, MS: ① REGISTER — POST /monitors
+        D->>S: POST /monitors<br/>{"id":"device-123","timeout":60,"alert_email":"admin@critmon.com"}
+        S->>C: createMonitor(req, res)
+        C->>C: ✅ Validate: id, timeout > 0, alert_email
+        alt Validation fails
+            C-->>D: 400 Bad Request
+        else ID already exists
+            C->>MS: exists(id)
+            MS-->>C: true
+            C-->>D: 409 Conflict
+        else Valid request
+            C->>MS: create(id, 60, "admin@critmon.com")
+            MS-->>C: { id, status: "active", timeout: 60, ... }
+            C->>TS: startTimer("device-123", 60)
+            TS->>TS: setTimeout(onTimerExpired, 60000ms)
+            C-->>D: 201 Created + monitor object
+        end
+    end
+
+    rect rgb(15, 52, 96)
+        Note over D, MS: ② HEARTBEAT — POST /monitors/:id/heartbeat
+        D->>S: POST /monitors/device-123/heartbeat
+        S->>C: heartbeat(req, res)
+        C->>MS: get("device-123")
+        alt Monitor not found
+            MS-->>C: undefined
+            C-->>D: 404 Not Found
+        else Monitor exists (active, paused, or down)
+            MS-->>C: monitor object
+            C->>MS: update(id, { status: "active", lastHeartbeat: now })
+            C->>TS: startTimer("device-123", 60)
+            TS->>TS: clearTimeout(existing)
+            TS->>TS: setTimeout(onTimerExpired, 60000ms)
+            C-->>D: 200 OK + updated monitor
+        end
+    end
+
+    rect rgb(233, 69, 96)
+        Note over D, MS: ③ TIMER EXPIRY — Automatic Alert
+        TS->>TS: ⏰ 60 seconds elapsed — no heartbeat
+        TS->>MS: update("device-123", { status: "down" })
+        TS->>TS: 🚨 console.log({ ALERT: "Device device-123 is down!", ... })
+        Note right of TS: Timer references cleaned up.<br/>Monitor persists in "down" state.
+    end
+
+    rect rgb(22, 33, 62)
+        Note over A, MS: ④ PAUSE — POST /monitors/:id/pause
+        A->>S: POST /monitors/device-123/pause
+        S->>C: pause(req, res)
+        C->>MS: get("device-123")
+        alt Already paused
+            C-->>A: 400 Bad Request
+        else Active monitor
+            C->>TS: clearTimer("device-123")
+            TS->>TS: clearTimeout + remove metadata
+            C->>MS: update(id, { status: "paused" })
+            C-->>A: 200 OK — "Send heartbeat to resume"
+        end
+    end
+
+    rect rgb(15, 52, 96)
+        Note over D, MS: ⑤ RESUME — Heartbeat after pause/down
+        D->>S: POST /monitors/device-123/heartbeat
+        S->>C: heartbeat(req, res)
+        C->>MS: update(id, { status: "active", lastHeartbeat: now })
+        C->>TS: startTimer("device-123", 60)
+        TS->>TS: New setTimeout(onTimerExpired, 60000ms)
+        C-->>D: 200 OK — Monitor resumed
+    end
+```
+
+### Monitor State Machine
+
+Every monitor transitions through three states. A heartbeat can recover a device from any state.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active: POST /monitors<br/>(register + start timer)
+
+    state Active {
+        [*] --> Counting
+        Counting --> Counting: heartbeat received<br/>(timer resets to full duration)
+    }
+
+    Active --> Paused: POST /pause<br/>(timer cleared)
+    Active --> Down: ⏰ Timer expires<br/>(alert fired)
+
+    Paused --> Active: POST /heartbeat<br/>(timer restarted)
+
+    Down --> Active: POST /heartbeat<br/>(recovery — timer restarted)
+
+    Active --> Destroyed: DELETE /monitors/:id
+    Paused --> Destroyed: DELETE /monitors/:id
+    Down --> Destroyed: DELETE /monitors/:id
+
+    Destroyed --> [*]
+
+    note right of Active
+        Timer is running.
+        Device is healthy.
+        Remaining time tracked.
+    end note
+
+    note right of Paused
+        No timer running.
+        No alerts will fire.
+        Maintenance mode.
+    end note
+
+    note left of Down
+        Timer expired.
+        Alert was fired.
+        Awaiting recovery heartbeat.
+    end note
+```
 
 ---
 
-## 3. Getting Started
+## Project Structure
 
-1.  **Fork this Repository:** Do not clone it directly. Create a fork to your own GitHub account.
-2.  **Environment:** You may use **Node.js, Python, Java or Go, etc.**.
-3.  **Submission:** Your final submission will be a link to your forked repository containing:
-    * The source code.
-    * The **Architecture Diagram**
-    * The `README.md` with documentation.
-
----
-
-## 4. The Architecture Diagram 
-**Task:** Before you write any code, you must design the logic flow.
-**Deliverable:** A **Sequence Diagram** or **State Flowchart** embedded in your `README.md`.
-
----
-
-## 5. User Stories & Acceptance Criteria
-
-### User Story 1: Registering a Monitor
-**As a** device administrator,  
-**I want to** create a new monitor for my device,  
-**So that** the system knows to track its status.
-
-**Acceptance Criteria:**
-- [ ] The API accepts a `POST /monitors` request.
-- [ ] Input: `{"id": "device-123", "timeout": 60, "alert_email": "admin@critmon.com"}`.
-- [ ] The system starts a countdown timer for 60 seconds associated with `device-123`.
-- [ ] Response: `201 Created` with a confirmation message.
-
-### User Story 2: The Heartbeat (Reset)
-**As a** remote device,  
-**I want to** send a signal to the server,  
-**So that** my timer is reset and no alert is sent.
-
-**Acceptance Criteria:**
-- [ ] The API accepts a `POST /monitors/{id}/heartbeat` request.
-- [ ] If the ID exists and the timer has NOT expired:
-    - [ ] Restart the countdown from the beginning (e.g., reset to 60 seconds).
-    - [ ] Return `200 OK`.
-- [ ] If the ID does not exist:
-    - [ ] Return `404 Not Found`.
-
-### User Story 3: The Alert (Failure State)
-**As a** support engineer,  
-**I want to** be notified immediately if a device stops sending heartbeats,  
-**So that** I can deploy a repair team.
-
-**Acceptance Criteria:**
-- [ ] If the timer for `device-123` reaches 0 seconds (no heartbeat received):
-    - [ ] The system must internally "fire" an alert.
-    - [ ] **Implementation:** For this project, simply `console.log` a JSON object: `{"ALERT": "Device device-123 is down!", "time": <timestamp>}`. (Or simulate sending an email).
-    - [ ] The monitor status changes to `down`.
-
----
-
-## 6. Bonus User Story (The "Snooze" Button)
-**As a** maintenance technician,  
-**I want to** pause monitoring while I am repairing a device,  
-**So that** I don't trigger false alarms.
-
-**Acceptance Criteria:**
-- [ ] Create a `POST /monitors/{id}/pause` endpoint.
-- [ ] When called, the timer stops completely. No alerts will fire.
-- [ ] Calling the heartbeat endpoint again automatically "un-pauses" the monitor and restarts the timer.
-
----
-
-## 7. The "Developer's Choice" Challenge
-We value engineers who look for "what's missing."
-
-**Task:** Identify **one** additional feature that makes this system more robust or user-friendly.
-1.  **Implement it.**
-2.  **Document it:** Explain *why* you added it in your README.
-
----
-
-## 8. Documentation Requirements
-Your final `README.md` must replace these instructions. It must cover:
-
-1.  **Architecture Diagram** 
-2.  **Setup Instructions** 
-3.  **API Documentation** 
-4.  **The Developer's Choice:** Explanation of your added feature.
-
----
-Submit your repo link via the [online](https://forms.office.com/e/rGKtfeZCsH) form.
-
-## 🛑 Pre-Submission Checklist
-**WARNING:** Before you submit your solution, you **MUST** pass every item on this list.
-If you miss any of these critical steps, your submission will be **automatically rejected** and you will **NOT** be invited to an interview.
-
-### 1. 📂 Repository & Code
-- [ ] **Public Access:** Is your GitHub repository set to **Public**? (We cannot review private repos).
-- [ ] **Clean Code:** Did you remove unnecessary files (like `node_modules`, `.env` with real keys, or `.DS_Store`)?
-- [ ] **Run Check:** if we clone your repo and run `npm start` (or equivalent), does the server start immediately without crashing?
-
-### 2. 📄 Documentation (Crucial)
-- [ ] **Architecture Diagram:** Did you include a visual Diagram (Flowchart or Sequence Diagram) in the README?
-- [ ] **README Swap:** Did you **DELETE** the original instructions (the problem brief) from this file and replace it with your own documentation?
-- [ ] **API Docs:** Is there a clear list of Endpoints and Example Requests in the README?
-
-
-### 3. 🧹 Git Hygiene
-- [ ] **Commit History:** Does your repo have multiple commits with meaningful messages? (A single "Initial Commit" is a red flag).
-
----
-**Ready?**
-If you checked all the boxes above, submit your repository link in the application form. Good luck! 🚀
+```
+Pulse-Check-API/
+├── src/
+│   ├── server.js               
+│   ├── routes/
+│   │   └── monitors.js         
+│   ├── controllers/
+│   │   └── monitorController.js
+│   ├── services/
+│   │   └── timerService.js     
+│   └── store/
+│       └── monitorStore.js     
+├── package.json
+├── .gitignore
+└── README.md
+```
